@@ -22,7 +22,7 @@ It starts in the next interactive session. There is nothing to configure.
 
 - **Pings only while you are away.** A ping goes out only when the session is idle and the cache is between two minutes and fifteen seconds from expiring. Each ping is `keepalive ping. Reply only: ok`.
 - **Capped per model.** At most 12 pings in a row on Opus and Fable, 6 on Sonnet, Haiku and any other model. On the 1-hour cache, that keeps an Opus session warm for about 12 hours.
-- **Ends on a handoff.** The last ping asks the agent to run a `handoff` skill while the cache is still warm, so a fresh session can pick up from its document. Without a skill of that name, the call fails and the agent stops.
+- **Ends on a handoff.** The last ping asks the agent to write a handoff while the cache is still warm, so a fresh session can pick up from it.
 - **Resets on your own prompt.** Anything you type starts the count again.
 - **Stops when pinging cannot help.** Two pings in a row that find the cache already cold stop the pings until you are back. So does a change of the logged-in account, since the cache belongs to the account.
 - **Shows what it does.** The status line reads `keepalive 3/12` while it pings, and says why when it stops.

@@ -32,10 +32,10 @@ test('caps by model family, defaulting to the smallest', async () => {
   expect(capFor('')).toBe(6)
 })
 
-test('only the last bump asks for the handoff, naming the tool', async () => {
+test('only the last bump asks for a handoff', async () => {
   expect(bumpText(5, 6)).toBe('keepalive ping. Reply only: ok')
   expect(bumpText(5, 6)).not.toContain('handoff')
-  expect(bumpText(6, 6)).toContain('Call the Skill tool with skill `handoff`')
+  expect(bumpText(6, 6)).toContain('Write a handoff')
 })
 
 test('/keepalive takes off and on, and reports the state for anything else', async () => {
