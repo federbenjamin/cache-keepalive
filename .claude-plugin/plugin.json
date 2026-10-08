@@ -1,6 +1,6 @@
 {
   "name": "cache-keepalive",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Keeps an idle session's prompt cache warm with a short prompt 2 min before it expires; capped per model, the last one a handoff",
   "author": { "name": "Benjamin Feder" },
   "types": "./types/index.d.ts"
