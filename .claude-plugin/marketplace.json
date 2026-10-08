@@ -1,0 +1,15 @@
+{
+  "name": "cache-keepalive",
+  "description": "Keeps an idle Claude Code session's prompt cache warm, so the session you come back to does not start cold",
+  "owner": {
+    "name": "federbenjamin"
+  },
+  "plugins": [
+    {
+      "name": "cache-keepalive",
+      "source": "./",
+      "description": "Keeps an idle Claude Code session's prompt cache warm, so the session you come back to does not start cold",
+      "category": "productivity"
+    }
+  ]
+}
