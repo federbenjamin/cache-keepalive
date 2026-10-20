@@ -111,10 +111,13 @@ test('a held account read does not hold the model request', async ($, on) => {
   await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
   acct.holdMs = 5_000
   const stream = $.turn.step({ turnId: 't1', index: 0, model: 'claude-opus-5-5', messageCount: 1 })
+  const iterator = stream[Symbol.asyncIterator]()
+  const first = iterator.next()
   await clock.settle()
   expect(step.runs).toBe(1)
   await clock.advance(5_000)
-  for await (const _ of stream) {
+  await first
+  for await (const _ of iterator) {
     // drain
   }
 })
@@ -180,7 +183,7 @@ test('a stale account read cannot stop bumps after the person starts a new turn'
     // drain
   }
   await $.turn.complete({ turnId: 't2', reason: 'answer', answer: 'ok', durationMs: 1, isAborted: false })
-  await clock.advance(HOUR - LEAD_MS)
+  await clock.advance(HOUR - LEAD_MS + TICK_MS)
   expect(statuses).not.toContain(accountChangedText('acct1', 'acct2'))
   expect(submitted).toEqual([bumpText(1, 12)])
 })
