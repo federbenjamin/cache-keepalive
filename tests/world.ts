@@ -25,7 +25,7 @@ export const run = (args: string) => ({ command: COMMAND, args, origin: { kind: 
 export function world(on: On) {
   const clock = mock.clock(on, { now: T0 })
   mock.env(on, {})
-  const acct = { name: 'acct1', loggedIn: true, runs: 0, holdMs: 0, isNextRefused: false }
+  const acct: { name: string; loggedIn: boolean; runs: number; holdMs: number; isNextRefused: boolean; nextStdout?: string } = { name: 'acct1', loggedIn: true, runs: 0, holdMs: 0, isNextRefused: false }
   on('process.run', async (_$, e) => {
     if (e.argv.join('\u0000') !== AUTH_STATUS.join('\u0000')) throw new Error('unexpected process command')
     acct.runs++
@@ -36,6 +36,9 @@ export function world(on: On) {
       acct.isNextRefused = false
       return { deny: 'timed out' }
     }
+    const nextStdout = acct.nextStdout
+    acct.nextStdout = undefined
+    if (nextStdout !== undefined) return { value: { exitCode: 0, stdout: nextStdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     const readable = acct.name !== ''
     const stdout = readable ? JSON.stringify(acct.loggedIn ? { loggedIn: true, email: acct.name } : { loggedIn: false }) : ''
     return { value: { exitCode: readable ? 0 : 1, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }

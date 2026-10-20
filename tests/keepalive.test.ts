@@ -64,11 +64,17 @@ test('only a known account that differs is a change', async () => {
   expect(isAccountChanged('a', '')).toBe(false)
 })
 
-test('the account is the email of a logged-in auth status, else unknown', async () => {
+test('the account is the email of a logged-in auth status, empty when logged out, unread otherwise', async () => {
   expect(accountOf('{"loggedIn":true,"email":"a@x.com","orgId":"o1"}')).toBe('a@x.com')
   expect(accountOf('{"loggedIn":false}')).toBe('')
-  expect(accountOf('{"loggedIn":true}')).toBe('')
-  expect(accountOf('not json')).toBe('')
+  expect(accountOf('{"loggedIn":true}')).toBe(undefined)
+  expect(accountOf('{"loggedIn":true,"email":""}')).toBe(undefined)
+  expect(accountOf('{"email":"a@x.com"}')).toBe(undefined)
+  expect(accountOf('{}')).toBe(undefined)
+  expect(accountOf('null')).toBe(undefined)
+  expect(accountOf('{"loggedIn":tr')).toBe(undefined)
+  expect(accountOf('not json')).toBe(undefined)
+  expect(accountOf('')).toBe(undefined)
 })
 
 test('an idle session gets exactly one bump in the window, none after expiry', async ($, on) => {

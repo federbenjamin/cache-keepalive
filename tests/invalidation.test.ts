@@ -13,13 +13,24 @@ async function drain(stream: AsyncIterable<unknown>) {
   }
 }
 
-function recordWrites(on: On): KeepaliveTiming[] {
-  const writes: KeepaliveTiming[] = []
+// The timing writes in the order they land; `hold.ms` holds the next write that long before it
+// lands, and a hot reload's state.get reads the last to land.
+function recordStore(on: On, clock: ReturnType<typeof world>['clock']) {
+  const landed: KeepaliveTiming[] = []
+  const hold = { ms: 0 }
   on('state.set', async (_$, e, next) => {
-    writes.push(e.value as KeepaliveTiming)
-    return next(e)
+    const ms = hold.ms
+    hold.ms = 0
+    if (ms > 0) await clock.sleep(ms)
+    const result = await next(e)
+    landed.push(e.value as KeepaliveTiming)
+    return result
   })
-  return writes
+  on('state.get', async (_$, e, next) => {
+    const value = landed.at(-1)
+    return value ? { value: { value, version: landed.length } } : next(e)
+  })
+  return { landed, hold }
 }
 
 const mainStep = ($: Parameters<typeof mainTurn>[0], turnId: string) => $.turn.step({ turnId, index: 0, model: 'claude-opus-5-5', messageCount: 1 })
@@ -245,7 +256,7 @@ test('an API error thrown after the response began reaches the caller and moves 
 
 test('a /clear during a request leaves the new conversation untimed', async ($, on) => {
   const { clock, submitted, step } = world(on)
-  const writes = recordWrites(on)
+  const { landed } = recordStore(on, clock)
   await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
   await $.turn.start({ text: 'hi', turnId: 't1' })
   step.chunks = [{ kind: 'text', index: 0, text: 'o' }, { kind: 'text', index: 0, text: 'k' }]
@@ -254,7 +265,7 @@ test('a /clear during a request leaves the new conversation untimed', async ($, 
   await iterator.next()
   await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
   await drain({ [Symbol.asyncIterator]: () => iterator })
-  expect(writes.at(-1)).toEqual(UNTIMED)
+  expect(landed.at(-1)).toEqual(UNTIMED)
   await clock.advance(HOUR)
   expect(submitted).toEqual([])
 })
@@ -276,7 +287,7 @@ test('a compaction during a request leaves the compacted conversation untimed', 
 
 test('a /clear while the account read is held stores nothing of the old request', async ($, on) => {
   const { clock, acct } = world(on)
-  const writes = recordWrites(on)
+  const { landed } = recordStore(on, clock)
   await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
   await $.turn.start({ text: 'hi', turnId: 't1' })
   acct.holdMs = 5_000
@@ -285,8 +296,64 @@ test('a /clear while the account read is held stores nothing of the old request'
   await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
   await clock.advance(5_000)
   await done
-  expect(writes.at(-1)).toEqual(UNTIMED)
+  expect(landed.at(-1)).toEqual(UNTIMED)
 })
+
+test("a /clear while the request's timing write is held leaves the stored timing untimed", async ($, on) => {
+  const { clock, submitted } = world(on)
+  const { landed, hold } = recordStore(on, clock)
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: 'hi', turnId: 't1' })
+  hold.ms = 5_000
+  const done = drain(mainStep($, 't1'))
+  await clock.settle()
+  const ended = $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
+  await clock.settle()
+  await clock.advance(5_000)
+  await ended
+  await done
+  expect(landed.at(-1)).toEqual(UNTIMED)
+  // A hot reload reads back what landed last: nothing of the old conversation to bump for.
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+  await clock.advance(HOUR)
+  expect(submitted).toEqual([])
+})
+
+test("an account stop whose write is held does not land over the person's later prompt", async ($, on) => {
+  const { clock, submitted, statuses, acct } = world(on)
+  const { landed, hold } = recordStore(on, clock)
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+  await mainTurn($, 't1')
+  acct.name = 'acct2'
+  hold.ms = 5_000
+  await clock.advance(TICK_MS)
+  expect(statuses.at(-1)).toBe(accountChangedText('acct1', 'acct2'))
+  await $.prompt.submit(typed('back'))
+  await clock.advance(5_000)
+  expect(landed.at(-1)?.isStopped).toBe(false)
+  // A hot reload before the person's request is answered reads back what landed last.
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+  await mainTurn($, 't2')
+  await clock.advance(HOUR - LEAD_MS)
+  expect(submitted).toEqual([bumpText(1, 12)])
+})
+
+for (const [kind, stdout] of [
+  ['cut-off JSON', '{"loggedIn":tr'],
+  ['a logged-in answer with no email', '{"loggedIn":true}'],
+] as const) {
+  test(`an account read that exits 0 with ${kind} keeps the account the cache was written under`, async ($, on) => {
+    const { clock, statuses, acct } = world(on)
+    await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+    await mainTurn($, 't1')
+    acct.nextStdout = stdout
+    await mainTurn($, 't2')
+    expect(acct.nextStdout).toBe(undefined)
+    acct.name = 'acct2'
+    await clock.advance(TICK_MS)
+    expect(statuses.at(-1)).toBe(accountChangedText('acct1', 'acct2'))
+  })
+}
 
 test('a held account read does not hold the model request', async ($, on) => {
   const { clock, acct, step } = world(on)
