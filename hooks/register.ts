@@ -14,6 +14,12 @@ import type { KeepaliveTiming } from '../types'
 // own, so the next request under another account rebuilds it whole. `/keepalive off` stops
 // them for the conversation, a typed prompt included, until `/keepalive on`.
 //
+// A compaction replaces the conversation, so the cache holds none of what the next request sends:
+// the timing starts over and no bump comes until a request writes the new conversation. The bump
+// after a conversation's first request is never counted cold: Claude Code sends that request's
+// marked system message as a block list and, unmarked on the next request, as a plain string, so
+// the next request misses the cache past the system prompt however warm it is.
+//
 // Every bump is submitted asUser, so the model reads the bare text without the engine's
 // "The cache-keepalive plugin sent a message" frame. A bump is still not a rewind point: the
 // rewind list holds the person's own prompts, and asUser keeps the plugin origin.
@@ -78,6 +84,18 @@ export function wasCold(usage: { cache_read_input_tokens: number; cache_creation
   return usage.cache_read_input_tokens < usage.cache_creation_input_tokens
 }
 
+// Whether the latest bump answered the conversation's first request, whose cache entry the bump
+// cannot read whatever its age.
+export function followsFirstRequest(t: Pick<KeepaliveTiming, 'bumpedFor' | 'firstSend'>): boolean {
+  return t.firstSend > 0 && t.bumpedFor === t.firstSend
+}
+
+// Whether a compaction replaced the main conversation: not a subagent's own, not a skipped one,
+// and not a `precompute`, which only keeps its summary for later.
+export function isConversationReplaced(e: { trigger: string; agentId?: string }, result: { skip?: string }): boolean {
+  return e.agentId === undefined && e.trigger !== 'precompute' && result.skip === undefined
+}
+
 // Whether the account the session would send under now is another than the one the cache was
 // written under. An unknown account on either side (logged out, a failed read) is no change.
 export function isAccountChanged(cachedUnder: string, current: string): boolean {
@@ -88,7 +106,7 @@ export function accountChangedText(from: string, to: string): string {
   return `keepalive: account changed (${from} → ${to}), cache cold; stopped until your next prompt`
 }
 
-const fresh = (): KeepaliveTiming => ({ lastSend: 0, bumpedFor: 0, bumps: 0, coldBumps: 0, model: '', account: '', isStopped: false, isOff: false })
+const fresh = (): KeepaliveTiming => ({ lastSend: 0, bumpedFor: 0, firstSend: 0, bumps: 0, coldBumps: 0, model: '', account: '', isStopped: false, isOff: false })
 
 // The logged-in account's email from `claude auth status --json`; '' when logged out or unreadable.
 export function accountOf(authStatus: string): string {
@@ -227,6 +245,7 @@ export const register: Register = on => {
       return result
     } finally {
       if (isAnswered) {
+        if (t.lastSend === 0) t.firstSend = startedAt
         t.lastSend = startedAt
         t.model = e.model
         t.account = await read
@@ -238,7 +257,7 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     if (!e.agentId) {
       isBusy = false
-      if (isBumpTurn && e.usage) {
+      if (isBumpTurn && e.usage && !followsFirstRequest(t)) {
         t.coldBumps = wasCold(e.usage) ? t.coldBumps + 1 : 0
         if (t.coldBumps >= COLD_LIMIT) {
           t.isStopped = true
@@ -251,6 +270,17 @@ export const register: Register = on => {
       isBumpTurn = false
     }
     return next(e)
+  })
+
+  on('session.compact', async ($, e, next) => {
+    const result = await next(e)
+    if (isConversationReplaced(e, result)) {
+      t = { ...fresh(), model: t.model, account: t.account, isOff: t.isOff }
+      isBumpPending = false
+      $.ui.status(t.isOff ? 'keepalive off' : undefined)
+      await $.state.set(TIMING, { ...t })
+    }
+    return result
   })
 
   // /clear and an in-session resume end this conversation without a session.start for the next,

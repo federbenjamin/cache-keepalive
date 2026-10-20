@@ -19,7 +19,7 @@ It starts in the next interactive session. There is nothing to configure.
 - **Pings only while you are away.** When the session is idle and the cache is between two minutes and fifteen seconds from expiring, it sends `keepalive ping. Reply only: ok`.
 - **Capped per model.** At most 12 pings in a row on Opus and Fable, 6 on Sonnet, Haiku and any other model.
 - **Ends on a handoff.** The last ping asks the agent to write a handoff while the cache is still warm, so a fresh session can pick up from it.
-- **Stops when pinging cannot help.** Your own prompt resets the count. Two pings in a row that find the cache already cold stop the pings until you are back, and so does a change of the logged-in account, since the cache belongs to the account. `/keepalive off` stops them for the conversation until `/keepalive on`.
+- **Stops when pinging cannot help.** Your own prompt resets the count. Two pings in a row that find the cache already cold stop the pings until you are back, and so does a change of the logged-in account, since the cache belongs to the account. After a compaction it waits for the next request, which writes the new conversation's cache. `/keepalive off` stops them for the conversation until `/keepalive on`.
 
 ## How it works
 

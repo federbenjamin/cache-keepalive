@@ -64,5 +64,6 @@ export function world(on: On) {
     return { value: undefined }
   })
   on('command.register', async (_$, e) => ({ value: { command: e.name } }))
+  on('session.compact', async (_$, e) => ({ messages: e.messages }))
   return { clock, submitted, asUser, statuses, acct, step }
 }
