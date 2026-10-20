@@ -12,7 +12,15 @@ Needs Claude Code; tested on 2.1.295.
 claude plugin install cache-keepalive --marketplace federbenjamin/cache-keepalive
 ```
 
-It starts in the next interactive session. There is nothing to configure.
+It starts in the next interactive session.
+
+Then turn off Claude Code's idle compaction by adding this to `~/.claude/settings.json`:
+
+```json
+"idleCompaction": false
+```
+
+Idle compaction summarizes a conversation of 200K tokens or more about 54 minutes into an idle spell, before the first ping is due. The pings would then keep only the summary warm, and the last ping's handoff would be written from it rather than from the full conversation.
 
 ## Features
 
