@@ -3,14 +3,16 @@ import type { KeepaliveTiming } from '../types'
 
 // Keeps the main conversation's prompt cache warm while the session sits open and idle: a short
 // prompt LEAD_MS before the cache would expire. The cache lifetime runs from the start of the
-// main thread's last request, and each request resets it. Bumps stop at the model's cap; the
-// last one asks for a handoff while the cache is still warm. The person's own next prompt
-// resets the count. A bump that finds the cache already cold has just rebuilt it, so the bumps
-// go on; COLD_LIMIT cold bumps in a row (the TTL dropped to 5m past plan usage, so every bump
-// lands after expiry) stop them until the person is back. So does a change of
-// account (`claude auth status`, polled each tick while the cache may be warm): the prompt cache is the
-// account's own, so the next request under another account rebuilds it whole. `/keepalive off`
-// stops them for the conversation, a typed prompt included, until `/keepalive on`.
+// main thread's last answered request, and each such request resets it; a request with no
+// response (interrupted before its first token, or dead on an API error) leaves it as it was.
+// Bumps stop at the model's cap; the last one asks for a handoff while the cache is still warm.
+// The person's own next prompt resets the count. A bump that finds the cache already cold has
+// just rebuilt it, so the bumps go on; COLD_LIMIT cold bumps in a row (the TTL dropped to 5m
+// past plan usage, so every bump lands after expiry) stop them until the person is back. So
+// does a change of account (`claude auth status`, polled each tick while the cache may be warm;
+// a read that a prompt or a turn overlapped is discarded): the prompt cache is the account's
+// own, so the next request under another account rebuilds it whole. `/keepalive off` stops
+// them for the conversation, a typed prompt included, until `/keepalive on`.
 //
 // Every bump is submitted asUser, so the model reads the bare text without the engine's
 // "The cache-keepalive plugin sent a message" frame. A bump is still not a rewind point: the
@@ -116,6 +118,7 @@ export const register: Register = on => {
   let isBumpPending = false // a bump was submitted and its turn has not started
   let isBumpTurn = false // the running main turn is a bump
   let tick: { cancel: () => void } | undefined
+  let epoch = 0
 
   on('session.start', async ($, e, next) => {
     tick?.cancel()
@@ -132,10 +135,12 @@ export const register: Register = on => {
       const ttl = (is5m ? 5 : 60) * 60_000
 
       tick = $.clock.every(TICK_MS, async () => {
-        const now = await $.clock.now()
+        const polledAt = await $.clock.now()
         // Polled only while a bump could still come: idle, not stopped or off, cache not expired.
-        if (!isBusy && !t.isStopped && !t.isOff && t.lastSend > 0 && now < t.lastSend + ttl) {
+        if (!isBusy && !t.isStopped && !t.isOff && t.lastSend > 0 && polledAt < t.lastSend + ttl) {
+          const epochAtRead = epoch
           const account = await currentAccount($)
+          if (epoch !== epochAtRead) return
           if (isAccountChanged(t.account, account)) {
             t.isStopped = true
             $.ui.status(accountChangedText(t.account, account))
@@ -143,6 +148,7 @@ export const register: Register = on => {
             return
           }
         }
+        const now = await $.clock.now()
         if (!isDue({ ...t, now, ttl, isBusy })) return
         t.bumpedFor = t.lastSend
         const cap = capFor(t.model)
@@ -183,6 +189,7 @@ export const register: Register = on => {
 
   on('prompt.submit', async ($, e, next) => {
     if (PERSON_ORIGINS.has(e.origin.kind)) {
+      epoch++
       t.bumps = 0
       t.coldBumps = 0
       t.isStopped = false
@@ -194,6 +201,8 @@ export const register: Register = on => {
   })
 
   on('turn.start', async ($, e, next) => {
+    if (e.agentId) return next(e)
+    epoch++
     isBusy = true
     isBumpTurn = isBumpPending
     isBumpPending = false
@@ -203,13 +212,27 @@ export const register: Register = on => {
   })
 
   on('turn.step', async function* ($, e, next) {
-    if (!e.agentId) {
-      t.lastSend = await $.clock.now()
-      t.model = e.model
-      t.account = await currentAccount($)
-      await $.state.set(TIMING, { ...t })
+    if (e.agentId) return yield* next(e)
+    const startedAt = await $.clock.now()
+    const read = currentAccount($)
+    let isAnswered = false
+    try {
+      const stream = next(e)
+      for await (const chunk of stream) {
+        if (chunk.kind !== 'engine') isAnswered = true
+        yield chunk
+      }
+      const result = await stream.result
+      if (result.stopReason !== null) isAnswered = true
+      return result
+    } finally {
+      if (isAnswered) {
+        t.lastSend = startedAt
+        t.model = e.model
+        t.account = await read
+        await $.state.set(TIMING, { ...t })
+      }
     }
-    return yield* next(e)
   })
 
   on('turn.complete', async ($, e, next) => {
