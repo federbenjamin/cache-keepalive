@@ -44,6 +44,8 @@ Every request in the main conversation restarts the cache's lifetime. The plugin
 - **Cache lifetime.** One hour by default. Five minutes when `FORCE_PROMPT_CACHING_5M` is `1` or `true`, or `CLAUDE_CODE_PROMPT_CACHE_TTL` is `5m`. Past your plan's usage, Claude Code drops to five minutes on its own; the first pings then find the cache cold and the plugin stops.
 - **Cost.** Each ping is a real request: it reads the cached prompt and writes a one-word reply. The caps sit well below the number of pings that would cost as much as one cold rebuild.
 - **Account check.** While a ping could still come, each 30-second check runs `claude auth status --json` to read the logged-in account.
+- **Compaction.** A compaction replaces the conversation, so the cache holds nothing worth keeping warm. Pings start again after the next request writes the new conversation.
+- **The first request.** Claude Code changes how it sends a conversation's first request on the request after it, so the ping right after a conversation's first request always rebuilds part of the cache. That ping is not counted as cold.
 - **Headless runs.** `claude -p` and other non-interactive sessions are never pinged.
 - **Rewind.** A ping is not a rewind point; the rewind list holds only your own prompts.
 
