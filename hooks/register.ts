@@ -5,7 +5,7 @@ import type { KeepaliveTiming } from '../types'
 // prompt LEAD_MS before the cache would expire. The cache lifetime runs from the start of the
 // main thread's last answered request, and each such request resets it; a request with no
 // response (interrupted before its first token, or dead on an API error) leaves it as it was.
-// Bumps stop at the model's cap; the last one asks for a handoff while the cache is still warm.
+// Bumps stop at the model's cap; the last one asks the agent to close the session (a closing skill, a handoff skill, or a handoff it writes) while the cache is still warm.
 // The person's own next prompt resets the count. A bump that finds the cache already cold has
 // just rebuilt it, so the bumps go on; COLD_LIMIT cold bumps in a row (the TTL dropped to 5m
 // past plan usage, so every bump lands after expiry) stop them until the person is back. So
@@ -55,8 +55,9 @@ export function bumpText(n: number, cap: number): string {
   return n < cap
     ? 'keepalive ping. Reply only: ok'
     : 'Last keepalive ping: the prompt cache expires after this. ' +
-        'Write a handoff now, so a fresh session can pick up from it: if a handoff skill is ' +
-        'installed, run it with the Skill tool. Do nothing else.'
+        'Close the session now, so a fresh session can pick up from it: run a session-closing ' +
+        'skill with the Skill tool if one is installed, else a handoff skill, else write a ' +
+        'handoff yourself. Do nothing else.'
 }
 
 // `/keepalive off|on`: the off flag after the args, and the line the command prints.
