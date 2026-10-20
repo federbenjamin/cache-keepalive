@@ -6,7 +6,7 @@ export type KeepaliveTiming = {
   bumps: number // bumps since the person's last prompt
   coldBumps: number // bumps in a row that found the cache cold
   model: string // the model the last answered main request named
-  account: string // the account email the last answered main request went under; '' when unknown
+  account: string // the account email the last answered main request went under; '' when logged out or not yet read; a failed read keeps the one before
   isStopped: boolean // COLD_LIMIT bumps in a row found the cache cold, or the account changed; wait for the person
   isOff: boolean // the person ran /keepalive off; no bumps until /keepalive on
 }

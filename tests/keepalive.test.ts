@@ -1,8 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import { accountOf, bumpText, capFor, COLD_LIMIT, followsFirstRequest, HEADROOM_MS, isAccountChanged, isConversationReplaced, isDue, keepaliveCommand, LEAD_MS, TICK_MS, wasCold } from '../hooks/register'
-import { COLD, HOUR, mainTurn, run, typed, WARM, world } from './world'
+import { COLD, HOUR, mainTurn, run, SUMMARY, T0, typed, WARM, world } from './world'
 
-const T0 = 1_000_000
 const base = { lastSend: T0, bumpedFor: 0, isStopped: false, isOff: false, ttl: HOUR, isBusy: false }
 
 test('a bump is due from LEAD_MS to HEADROOM_MS before expiry, and never after', async () => {
@@ -71,8 +70,6 @@ test('the account is the email of a logged-in auth status, else unknown', async 
   expect(accountOf('{"loggedIn":true}')).toBe('')
   expect(accountOf('not json')).toBe('')
 })
-
-const SUMMARY = [{ role: 'user' as const, text: 'summary', toolUses: [] }]
 
 test('an idle session gets exactly one bump in the window, none after expiry', async ($, on) => {
   const { clock, submitted } = world(on)

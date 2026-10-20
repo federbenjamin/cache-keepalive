@@ -10,12 +10,15 @@ import type { KeepaliveTiming } from '../types'
 // just rebuilt it, so the bumps go on; COLD_LIMIT cold bumps in a row (the TTL dropped to 5m
 // past plan usage, so every bump lands after expiry) stop them until the person is back. So
 // does a change of account (`claude auth status`, polled each tick while the cache may be warm;
-// a read that a prompt or a turn overlapped is discarded): the prompt cache is the account's
-// own, so the next request under another account rebuilds it whole. `/keepalive off` stops
-// them for the conversation, a typed prompt included, until `/keepalive on`.
+// a read that a prompt or a turn overlapped is discarded, and a failed read changes nothing):
+// the prompt cache is the account's own, so the next request under another account rebuilds it
+// whole. A bump that got no response left the cache as it was; it is not sent again, and the
+// status line says so. `/keepalive off` stops them for the conversation, a typed prompt
+// included, until `/keepalive on`.
 //
 // A compaction replaces the conversation, so the cache holds none of what the next request sends:
-// the timing starts over and no bump comes until a request writes the new conversation. The bump
+// the timing starts over and no bump comes until a request writes the new conversation; a request
+// still running when the conversation was replaced (a compaction, /clear) times nothing. The bump
 // after a conversation's first request is never counted cold: Claude Code sends that request's
 // marked system message as a block list and, unmarked on the next request, as a plain string, so
 // the next request misses the cache past the system prompt however warm it is.
@@ -118,13 +121,13 @@ export function accountOf(authStatus: string): string {
   }
 }
 
-// The account this session sends under; '' when that cannot be read.
-async function currentAccount($: EngineInterface): Promise<string> {
+// The account this session sends under, '' when logged out; undefined when the read failed.
+async function currentAccount($: EngineInterface): Promise<string | undefined> {
   try {
     const { exitCode, stdout } = await $.process.run(AUTH_STATUS, { timeoutMs: 5_000 })
-    return exitCode === 0 ? accountOf(stdout) : ''
+    return exitCode === 0 ? accountOf(stdout) : undefined
   } catch {
-    return ''
+    return undefined
   }
 }
 
@@ -159,7 +162,7 @@ export const register: Register = on => {
           const epochAtRead = epoch
           const account = await currentAccount($)
           if (epoch !== epochAtRead) return
-          if (isAccountChanged(t.account, account)) {
+          if (account !== undefined && isAccountChanged(t.account, account)) {
             t.isStopped = true
             $.ui.status(accountChangedText(t.account, account))
             await $.state.set(TIMING, { ...t })
@@ -231,6 +234,7 @@ export const register: Register = on => {
 
   on('turn.step', async function* ($, e, next) {
     if (e.agentId) return yield* next(e)
+    const timing = t
     const startedAt = await $.clock.now()
     const read = currentAccount($)
     let isAnswered = false
@@ -245,11 +249,12 @@ export const register: Register = on => {
       return result
     } finally {
       if (isAnswered) {
-        if (t.lastSend === 0) t.firstSend = startedAt
-        t.lastSend = startedAt
-        t.model = e.model
-        t.account = await read
-        await $.state.set(TIMING, { ...t })
+        if (timing.lastSend === 0) timing.firstSend = startedAt
+        timing.lastSend = startedAt
+        timing.model = e.model
+        const account = await read
+        if (account !== undefined) timing.account = account
+        if (timing === t) await $.state.set(TIMING, { ...timing })
       }
     }
   })
@@ -257,7 +262,9 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     if (!e.agentId) {
       isBusy = false
-      if (isBumpTurn && e.usage && !followsFirstRequest(t)) {
+      if (isBumpTurn && t.lastSend > 0 && t.lastSend === t.bumpedFor) {
+        $.ui.status('keepalive: ping got no response, cache left to expire')
+      } else if (isBumpTurn && e.usage && !followsFirstRequest(t)) {
         t.coldBumps = wasCold(e.usage) ? t.coldBumps + 1 : 0
         if (t.coldBumps >= COLD_LIMIT) {
           t.isStopped = true
