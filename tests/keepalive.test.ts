@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import { accountChangedText, accountOf, AUTH_STATUS, bumpText, capFor, COLD_LIMIT, COMMAND, HEADROOM_MS, isAccountChanged, isDue, keepaliveCommand, LEAD_MS, TICK_MS, wasCold } from '../hooks/register'
+import { accountChangedText, accountOf, AUTH_STATUS, bumpText, capFor, COLD_LIMIT, COMMAND, followsFirstRequest, HEADROOM_MS, isAccountChanged, isConversationReplaced, isDue, keepaliveCommand, LEAD_MS, TICK_MS, wasCold } from '../hooks/register'
 
 const HOUR = 60 * 60_000
 const T0 = 1_000_000
@@ -49,6 +49,17 @@ test('a bump that wrote more than it read found the cache cold', async () => {
   expect(wasCold({ cache_read_input_tokens: 31_000, cache_creation_input_tokens: 42_000 })).toBe(true)
 })
 
+test("only the main conversation's installed compaction replaces it, and only the first request's bump is exempt", async () => {
+  expect(isConversationReplaced({ trigger: 'auto' }, {})).toBe(true)
+  expect(isConversationReplaced({ trigger: 'manual' }, {})).toBe(true)
+  expect(isConversationReplaced({ trigger: 'precompute' }, {})).toBe(false)
+  expect(isConversationReplaced({ trigger: 'auto', agentId: 'a1' }, {})).toBe(false)
+  expect(isConversationReplaced({ trigger: 'auto' }, { skip: 'blocked' })).toBe(false)
+  expect(followsFirstRequest({ firstSend: T0, bumpedFor: T0 })).toBe(true)
+  expect(followsFirstRequest({ firstSend: T0, bumpedFor: T0 + 1 })).toBe(false)
+  expect(followsFirstRequest({ firstSend: 0, bumpedFor: 0 })).toBe(false)
+})
+
 test('only a known account that differs is a change', async () => {
   expect(isAccountChanged('a', 'b')).toBe(true)
   expect(isAccountChanged('a', 'a')).toBe(false)
@@ -74,6 +85,7 @@ async function mainTurn($: Engine, turnId: string, usage?: { cache_read_input_to
   await $.turn.complete({ turnId, reason: 'answer', answer: 'ok', durationMs: 1, isAborted: false, usage: turnUsage })
 }
 
+const SUMMARY = [{ role: 'user' as const, text: 'summary', toolUses: [] }]
 const COLD = { cache_read_input_tokens: 0, cache_creation_input_tokens: 163_000 }
 const WARM = { cache_read_input_tokens: 163_000, cache_creation_input_tokens: 20 }
 
@@ -113,6 +125,7 @@ function world(on: On) {
     return { value: undefined }
   })
   on('command.register', async (_$, e) => ({ value: { command: e.name } }))
+  on('session.compact', async (_$, e) => ({ messages: e.messages }))
   return { clock, submitted, asUser, statuses, acct }
 }
 
@@ -231,6 +244,8 @@ test('auth status is not polled once the cache has expired', async ($, on) => {
 test('one cold bump rebuilt the cache, so the bumps go on', async ($, on) => {
   const { clock, submitted } = world(on)
   await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+  await mainTurn($, 't0')
+  await clock.advance(TICK_MS)
   await mainTurn($, 't1')
   await clock.advance(HOUR - LEAD_MS)
   await mainTurn($, 'b1', COLD)
@@ -245,6 +260,8 @@ test('one cold bump rebuilt the cache, so the bumps go on', async ($, on) => {
 test('COLD_LIMIT cold bumps in a row stop the bumps until the person is back', async ($, on) => {
   const { clock, submitted, statuses } = world(on)
   await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+  await mainTurn($, 't0')
+  await clock.advance(TICK_MS)
   await mainTurn($, 't1')
   for (let n = 1; n <= COLD_LIMIT; n++) {
     await clock.advance(HOUR - LEAD_MS)
@@ -259,4 +276,26 @@ test('COLD_LIMIT cold bumps in a row stop the bumps until the person is back', a
   await mainTurn($, 'b3', COLD)
   await clock.advance(HOUR - LEAD_MS)
   expect(submitted).toHaveLength(COLD_LIMIT + 2)
+})
+
+test("a compaction leaves nothing to keep warm, and the bump after the new conversation's first request is not counted cold", async ($, on) => {
+  const { clock, submitted } = world(on)
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+  await mainTurn($, 't0')
+  await clock.advance(TICK_MS)
+  await mainTurn($, 't1')
+  await $.session.compact({ trigger: 'precompute', messages: SUMMARY })
+  await clock.advance(HOUR - LEAD_MS)
+  expect(submitted).toEqual([bumpText(1, 12)]) // a precompute installs nothing: the old cache is still the one to keep warm
+  await mainTurn($, 'b1', WARM)
+  await $.session.compact({ trigger: 'auto', messages: SUMMARY })
+  await clock.advance(2 * HOUR)
+  expect(submitted).toHaveLength(1) // the compacted conversation is in no cache yet
+  await mainTurn($, 't2')
+  for (let n = 2; n <= COLD_LIMIT + 1; n++) {
+    await clock.advance(HOUR - LEAD_MS)
+    await mainTurn($, `b${n}`, COLD)
+  }
+  await clock.advance(HOUR - LEAD_MS)
+  expect(submitted).toHaveLength(COLD_LIMIT + 2) // the first cold bump answered t2, the first request, so it did not count
 })

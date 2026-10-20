@@ -2,6 +2,7 @@
 export type KeepaliveTiming = {
   lastSend: number // when the main thread's last request started, ms; 0 before the first
   bumpedFor: number // the lastSend the latest bump answered
+  firstSend: number // when the conversation's first request started (a fresh one, or the first after a compaction); 0 before it
   bumps: number // bumps since the person's last prompt
   coldBumps: number // bumps in a row that found the cache cold
   model: string // the model the last main request named
