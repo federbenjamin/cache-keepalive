@@ -55,7 +55,8 @@ export function bumpText(n: number, cap: number): string {
   return n < cap
     ? 'keepalive ping. Reply only: ok'
     : 'Last keepalive ping: the prompt cache expires after this. ' +
-        'Write a handoff now, so a fresh session can pick up from it. Do nothing else.'
+        'Write a handoff now, so a fresh session can pick up from it: if a handoff skill is ' +
+        'installed, run it with the Skill tool. Do nothing else.'
 }
 
 // `/keepalive off|on`: the off flag after the args, and the line the command prints.
