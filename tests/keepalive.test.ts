@@ -33,6 +33,7 @@ test('only the last bump asks for a handoff', async () => {
   expect(bumpText(5, 6)).toBe('keepalive ping. Reply only: ok')
   expect(bumpText(5, 6)).not.toContain('handoff')
   expect(bumpText(6, 6)).toContain('Write a handoff')
+  expect(bumpText(6, 6)).toContain('handoff skill is installed, run it with the Skill tool')
 })
 
 test('/keepalive takes off and on, and reports the state for anything else', async () => {
