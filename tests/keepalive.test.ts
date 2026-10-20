@@ -1,10 +1,7 @@
-import { expect, mock, test } from 'claude-code/testing'
-import type { Engine } from 'claude-code/testing'
-import type { On } from 'claude-code'
-import { accountChangedText, accountOf, AUTH_STATUS, bumpText, capFor, COLD_LIMIT, COMMAND, followsFirstRequest, HEADROOM_MS, isAccountChanged, isConversationReplaced, isDue, keepaliveCommand, LEAD_MS, TICK_MS, wasCold } from '../hooks/register'
+import { expect, test } from 'claude-code/testing'
+import { accountOf, bumpText, capFor, COLD_LIMIT, followsFirstRequest, HEADROOM_MS, isAccountChanged, isConversationReplaced, isDue, keepaliveCommand, LEAD_MS, TICK_MS, wasCold } from '../hooks/register'
+import { COLD, HOUR, mainTurn, run, SUMMARY, T0, typed, WARM, world } from './world'
 
-const HOUR = 60 * 60_000
-const T0 = 1_000_000
 const base = { lastSend: T0, bumpedFor: 0, isStopped: false, isOff: false, ttl: HOUR, isBusy: false }
 
 test('a bump is due from LEAD_MS to HEADROOM_MS before expiry, and never after', async () => {
@@ -67,70 +64,18 @@ test('only a known account that differs is a change', async () => {
   expect(isAccountChanged('a', '')).toBe(false)
 })
 
-test('the account is the email of a logged-in auth status, else unknown', async () => {
+test('the account is the email of a logged-in auth status, empty when logged out, unread otherwise', async () => {
   expect(accountOf('{"loggedIn":true,"email":"a@x.com","orgId":"o1"}')).toBe('a@x.com')
   expect(accountOf('{"loggedIn":false}')).toBe('')
-  expect(accountOf('{"loggedIn":true}')).toBe('')
-  expect(accountOf('not json')).toBe('')
+  expect(accountOf('{"loggedIn":true}')).toBe(undefined)
+  expect(accountOf('{"loggedIn":true,"email":""}')).toBe(undefined)
+  expect(accountOf('{"email":"a@x.com"}')).toBe(undefined)
+  expect(accountOf('{}')).toBe(undefined)
+  expect(accountOf('null')).toBe(undefined)
+  expect(accountOf('{"loggedIn":tr')).toBe(undefined)
+  expect(accountOf('not json')).toBe(undefined)
+  expect(accountOf('')).toBe(undefined)
 })
-
-// One main turn with one request, at the clock's current time.
-async function mainTurn($: Engine, turnId: string, usage?: { cache_read_input_tokens: number; cache_creation_input_tokens: number }) {
-  await $.turn.start({ text: 'hi', turnId })
-  const stream = $.turn.step({ turnId, index: 0, model: 'claude-opus-5-5', messageCount: 1 })
-  for await (const _ of stream) {
-    // drain
-  }
-  const turnUsage = usage && { input_tokens: 2, output_tokens: 1, model: 'claude-opus-5-5', ...usage }
-  await $.turn.complete({ turnId, reason: 'answer', answer: 'ok', durationMs: 1, isAborted: false, usage: turnUsage })
-}
-
-const SUMMARY = [{ role: 'user' as const, text: 'summary', toolUses: [] }]
-const COLD = { cache_read_input_tokens: 0, cache_creation_input_tokens: 163_000 }
-const WARM = { cache_read_input_tokens: 163_000, cache_creation_input_tokens: 20 }
-
-// The engine beneath the plugin: a clock at T0, no env, a model that answers each request at
-// once, a `claude auth status` logged in as `acct.name` (fails when it is ''), and a record of every
-// prompt the plugin submits.
-function world(on: On) {
-  const clock = mock.clock(on, { now: T0 })
-  mock.env(on, {})
-  const acct = { name: 'acct1', runs: 0 }
-  on('process.run', async (_$, e) => {
-    expect(e.argv).toEqual(AUTH_STATUS)
-    acct.runs++
-    const ok = acct.name !== ''
-    const stdout = ok ? JSON.stringify({ loggedIn: true, email: acct.name }) : ''
-    return { value: { exitCode: ok ? 0 : 1, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
-  })
-  const submitted: string[] = []
-  const asUser: boolean[] = []
-  const statuses: (string | undefined)[] = []
-  on('session.start', async (_$, e) => ({ cwd: e.cwd }))
-  on('session.end', async (_$, e) => ({ sessionId: e.sessionId }))
-  on('turn.start', async (_$, e) => ({ turnId: e.turnId }))
-  on('turn.complete', async (_$, e) => ({ text: e.answer }))
-  on('prompt.submit', async (_$, e) => {
-    if (e.origin.kind === 'plugin') {
-      submitted.push(e.text)
-      asUser.push(e.origin.asUser === true)
-    }
-    return { text: e.text }
-  })
-  on('turn.step', async function* (_$, e) {
-    return { turnId: e.turnId, index: e.index, answer: 'ok', toolUses: [], stopReason: 'end_turn', usage: null }
-  })
-  on('ui.status', async (_$, e) => {
-    statuses.push(e.text)
-    return { value: undefined }
-  })
-  on('command.register', async (_$, e) => ({ value: { command: e.name } }))
-  on('session.compact', async (_$, e) => ({ messages: e.messages }))
-  return { clock, submitted, asUser, statuses, acct }
-}
-
-const typed = (text: string) => ({ text, wait: false, origin: { kind: 'composer' as const } })
-const run = (args: string) => ({ command: COMMAND, args, origin: { kind: 'composer' as const }, presentation: { isFullscreen: false, columns: 120 } })
 
 test('an idle session gets exactly one bump in the window, none after expiry', async ($, on) => {
   const { clock, submitted } = world(on)
@@ -201,44 +146,6 @@ test('/keepalive off stops bumps through a typed prompt; /keepalive on brings th
   await mainTurn($, 't2')
   await clock.advance(HOUR - LEAD_MS)
   expect(submitted).toEqual([bumpText(1, 12)])
-})
-
-test('an account switch stops the bumps within one tick, until the person is back', async ($, on) => {
-  const { clock, submitted, statuses, acct } = world(on)
-  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
-  await mainTurn($, 't1')
-  await clock.advance(10 * TICK_MS)
-  acct.name = 'acct2'
-  await clock.advance(TICK_MS)
-  expect(statuses.at(-1)).toBe(accountChangedText('acct1', 'acct2'))
-  await clock.advance(HOUR)
-  expect(submitted).toEqual([])
-  // The person's own prompt rebuilds the cache under acct2; bumps resume from there.
-  await $.prompt.submit(typed('back'))
-  await mainTurn($, 't2')
-  await clock.advance(HOUR - LEAD_MS)
-  expect(submitted).toEqual([bumpText(1, 12)])
-})
-
-test('an account that cannot be read never stops the bumps', async ($, on) => {
-  const { clock, submitted, acct } = world(on)
-  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
-  await mainTurn($, 't1')
-  acct.name = ''
-  await clock.advance(HOUR - LEAD_MS)
-  expect(acct.runs).toBeGreaterThan(1)
-  expect(submitted).toEqual([bumpText(1, 12)])
-})
-
-test('auth status is not polled once the cache has expired', async ($, on) => {
-  const { clock, acct } = world(on)
-  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
-  await mainTurn($, 't1')
-  await clock.advance(HOUR + TICK_MS)
-  const runs = acct.runs
-  expect(runs).toBeGreaterThan(1)
-  await clock.advance(HOUR)
-  expect(acct.runs).toBe(runs)
 })
 
 test('one cold bump rebuilt the cache, so the bumps go on', async ($, on) => {

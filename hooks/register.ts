@@ -3,17 +3,22 @@ import type { KeepaliveTiming } from '../types'
 
 // Keeps the main conversation's prompt cache warm while the session sits open and idle: a short
 // prompt LEAD_MS before the cache would expire. The cache lifetime runs from the start of the
-// main thread's last request, and each request resets it. Bumps stop at the model's cap; the
-// last one asks for a handoff while the cache is still warm. The person's own next prompt
-// resets the count. A bump that finds the cache already cold has just rebuilt it, so the bumps
-// go on; COLD_LIMIT cold bumps in a row (the TTL dropped to 5m past plan usage, so every bump
-// lands after expiry) stop them until the person is back. So does a change of
-// account (`claude auth status`, polled each tick while the cache may be warm): the prompt cache is the
-// account's own, so the next request under another account rebuilds it whole. `/keepalive off`
-// stops them for the conversation, a typed prompt included, until `/keepalive on`.
+// main thread's last answered request, and each such request resets it; a request with no
+// response (interrupted before its first token, or dead on an API error) leaves it as it was.
+// Bumps stop at the model's cap; the last one asks for a handoff while the cache is still warm.
+// The person's own next prompt resets the count. A bump that finds the cache already cold has
+// just rebuilt it, so the bumps go on; COLD_LIMIT cold bumps in a row (the TTL dropped to 5m
+// past plan usage, so every bump lands after expiry) stop them until the person is back. So
+// does a change of account (`claude auth status`, polled each tick while the cache may be warm;
+// a read that a prompt or a turn overlapped is discarded, and a failed read changes nothing):
+// the prompt cache is the account's own, so the next request under another account rebuilds it
+// whole. A bump that got no response left the cache as it was; it is not sent again, and the
+// status line says so. `/keepalive off` stops them for the conversation, a typed prompt
+// included, until `/keepalive on`.
 //
 // A compaction replaces the conversation, so the cache holds none of what the next request sends:
-// the timing starts over and no bump comes until a request writes the new conversation. The bump
+// the timing starts over and no bump comes until a request writes the new conversation; a request
+// still running when the conversation was replaced (a compaction, /clear) times nothing. The bump
 // after a conversation's first request is never counted cold: Claude Code sends that request's
 // marked system message as a block list and, unmarked on the next request, as a plain string, so
 // the next request misses the cache past the system prompt however warm it is.
@@ -106,34 +111,52 @@ export function accountChangedText(from: string, to: string): string {
 
 const fresh = (): KeepaliveTiming => ({ lastSend: 0, bumpedFor: 0, firstSend: 0, bumps: 0, coldBumps: 0, model: '', account: '', isStopped: false, isOff: false })
 
-// The logged-in account's email from `claude auth status --json`; '' when logged out or unreadable.
-export function accountOf(authStatus: string): string {
+// The logged-in account's email from `claude auth status --json`; '' when it says logged out,
+// undefined when it says neither (not JSON, or logged in with no email).
+export function accountOf(authStatus: string): string | undefined {
   try {
-    const status = JSON.parse(authStatus) as { loggedIn?: unknown; email?: unknown }
-    return status.loggedIn === true && typeof status.email === 'string' ? status.email : ''
+    const { loggedIn, email } = JSON.parse(authStatus) as { loggedIn?: unknown; email?: unknown }
+    if (loggedIn === false) return ''
+    return loggedIn === true && typeof email === 'string' && email !== '' ? email : undefined
   } catch {
-    return ''
+    return undefined
   }
 }
 
-// The account this session sends under; '' when that cannot be read.
-async function currentAccount($: EngineInterface): Promise<string> {
+// The account this session sends under, '' when logged out; undefined when the read failed or named no account.
+async function currentAccount($: EngineInterface): Promise<string | undefined> {
   try {
     const { exitCode, stdout } = await $.process.run(AUTH_STATUS, { timeoutMs: 5_000 })
-    return exitCode === 0 ? accountOf(stdout) : ''
+    return exitCode === 0 ? accountOf(stdout) : undefined
   } catch {
-    return ''
+    return undefined
   }
+}
+
+// One load's timing writes: how many went out, and the newest of them that landed.
+type Writes = { issued: number; newestLanded: number }
+
+// Stores the timing `live` answers, whole. A write that lands after a later one landed (a
+// state.set hook held it) put an older timing over a newer one, so it writes the timing again.
+async function save($: EngineInterface, writes: Writes, live: () => KeepaliveTiming): Promise<void> {
+  const write = ++writes.issued
+  await $.state.set(TIMING, { ...live() })
+  const isOvertaken = write < writes.newestLanded
+  writes.newestLanded = Math.max(writes.newestLanded, write)
+  if (isOvertaken) await save($, writes, live)
 }
 
 export const register: Register = on => {
   // The timing lives here for synchronous checks and is written through to $.state, which
   // keeps it across a hot reload; session.start reads it back.
   let t = fresh()
+  const live = () => t
+  const writes: Writes = { issued: 0, newestLanded: 0 }
   let isBusy = false
   let isBumpPending = false // a bump was submitted and its turn has not started
   let isBumpTurn = false // the running main turn is a bump
   let tick: { cancel: () => void } | undefined
+  let epoch = 0
 
   on('session.start', async ($, e, next) => {
     tick?.cancel()
@@ -150,23 +173,26 @@ export const register: Register = on => {
       const ttl = (is5m ? 5 : 60) * 60_000
 
       tick = $.clock.every(TICK_MS, async () => {
-        const now = await $.clock.now()
+        const polledAt = await $.clock.now()
         // Polled only while a bump could still come: idle, not stopped or off, cache not expired.
-        if (!isBusy && !t.isStopped && !t.isOff && t.lastSend > 0 && now < t.lastSend + ttl) {
+        if (!isBusy && !t.isStopped && !t.isOff && t.lastSend > 0 && polledAt < t.lastSend + ttl) {
+          const epochAtRead = epoch
           const account = await currentAccount($)
-          if (isAccountChanged(t.account, account)) {
+          if (epoch !== epochAtRead) return
+          if (account !== undefined && isAccountChanged(t.account, account)) {
             t.isStopped = true
             $.ui.status(accountChangedText(t.account, account))
-            await $.state.set(TIMING, { ...t })
+            await save($, writes, live)
             return
           }
         }
+        const now = await $.clock.now()
         if (!isDue({ ...t, now, ttl, isBusy })) return
         t.bumpedFor = t.lastSend
         const cap = capFor(t.model)
         if (t.bumps >= cap) {
           $.ui.status(`keepalive: done (${cap}/${cap}), cache left to expire`)
-          await $.state.set(TIMING, { ...t })
+          await save($, writes, live)
           return
         }
         t.bumps++
@@ -178,7 +204,7 @@ export const register: Register = on => {
           isBumpPending = false
           $.ui.status('keepalive: submit failed')
         }
-        await $.state.set(TIMING, { ...t })
+        await save($, writes, live)
       })
       // After the timer, so a refused registration costs the command, not the bumps.
       await $.command.register({
@@ -195,23 +221,26 @@ export const register: Register = on => {
     const { isOff, text } = keepaliveCommand(e.args, t.isOff)
     t.isOff = isOff
     $.ui.status(isOff ? 'keepalive off' : undefined)
-    await $.state.set(TIMING, { ...t })
+    await save($, writes, live)
     return { text }
   })
 
   on('prompt.submit', async ($, e, next) => {
     if (PERSON_ORIGINS.has(e.origin.kind)) {
+      epoch++
       t.bumps = 0
       t.coldBumps = 0
       t.isStopped = false
       isBumpPending = false
       $.ui.status(t.isOff ? 'keepalive off' : undefined)
-      await $.state.set(TIMING, { ...t })
+      await save($, writes, live)
     }
     return next(e)
   })
 
   on('turn.start', async ($, e, next) => {
+    if (e.agentId) return next(e)
+    epoch++
     isBusy = true
     isBumpTurn = isBumpPending
     isBumpPending = false
@@ -221,21 +250,38 @@ export const register: Register = on => {
   })
 
   on('turn.step', async function* ($, e, next) {
-    if (!e.agentId) {
-      const now = await $.clock.now()
-      if (t.lastSend === 0) t.firstSend = now
-      t.lastSend = now
-      t.model = e.model
-      t.account = await currentAccount($)
-      await $.state.set(TIMING, { ...t })
+    if (e.agentId) return yield* next(e)
+    const timing = t
+    const startedAt = await $.clock.now()
+    const read = currentAccount($)
+    let isAnswered = false
+    try {
+      const stream = next(e)
+      for await (const chunk of stream) {
+        if (chunk.kind !== 'engine') isAnswered = true
+        yield chunk
+      }
+      const result = await stream.result
+      if (result.stopReason !== null) isAnswered = true
+      return result
+    } finally {
+      if (isAnswered) {
+        if (timing.lastSend === 0) timing.firstSend = startedAt
+        timing.lastSend = startedAt
+        timing.model = e.model
+        const account = await read
+        if (account !== undefined) timing.account = account
+        if (timing === t) await save($, writes, live)
+      }
     }
-    return yield* next(e)
   })
 
   on('turn.complete', async ($, e, next) => {
     if (!e.agentId) {
       isBusy = false
-      if (isBumpTurn && e.usage && !followsFirstRequest(t)) {
+      if (isBumpTurn && t.lastSend > 0 && t.lastSend === t.bumpedFor) {
+        $.ui.status('keepalive: ping got no response, cache left to expire')
+      } else if (isBumpTurn && e.usage && !followsFirstRequest(t)) {
         t.coldBumps = wasCold(e.usage) ? t.coldBumps + 1 : 0
         if (t.coldBumps >= COLD_LIMIT) {
           t.isStopped = true
@@ -243,7 +289,7 @@ export const register: Register = on => {
         } else if (t.coldBumps > 0) {
           $.ui.status('keepalive: cache was cold, rebuilt; pings go on')
         }
-        await $.state.set(TIMING, { ...t })
+        await save($, writes, live)
       }
       isBumpTurn = false
     }
@@ -256,7 +302,7 @@ export const register: Register = on => {
       t = { ...fresh(), model: t.model, account: t.account, isOff: t.isOff }
       isBumpPending = false
       $.ui.status(t.isOff ? 'keepalive off' : undefined)
-      await $.state.set(TIMING, { ...t })
+      await save($, writes, live)
     }
     return result
   })
@@ -269,7 +315,7 @@ export const register: Register = on => {
     isBumpPending = false
     isBumpTurn = false
     $.ui.status(undefined)
-    await $.state.set(TIMING, { ...t })
+    await save($, writes, live)
     return next(e)
   })
 }

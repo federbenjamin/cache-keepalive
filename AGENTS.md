@@ -9,7 +9,7 @@ A Claude Code mod that keeps an idle session's prompt cache warm with short ping
 
 ## Rules
 
-- Mod code: `$` is only passed to functions in the same file as the hooks (`claude plugin validate` refuses `$` across an import). Pure logic is exported from `hooks/register.ts` and tested in `tests/keepalive.test.ts`.
+- Mod code: `$` is only passed to functions in the same file as the hooks (`claude plugin validate` refuses `$` across an import). Pure logic is exported from `hooks/register.ts` and tested in `tests/`.
 
 <!-- >>> git-workflow (generated block; do not edit by hand) -->
 ## Git workflow
