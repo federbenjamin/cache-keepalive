@@ -1,5 +1,7 @@
 # cache-keepalive
 
+> **Moved.** This plugin now lives in [federbenjamin/feder-plugins](https://github.com/federbenjamin/feder-plugins) as `plugins/cache-keepalive`, where it is maintained alongside the other plugins. Install it with `claude plugin install cache-keepalive --marketplace federbenjamin/feder-plugins`. This repository is archived and no longer updated.
+
 A [Claude Code](https://docs.anthropic.com/en/docs/claude-code) plugin that keeps an idle session's prompt cache warm, so the session you come back to does not start cold.
 
 Claude Code caches the conversation's prompt for an hour (five minutes on some plans). Once that cache expires, your next message rebuilds the whole conversation: slower, and it costs more usage.
